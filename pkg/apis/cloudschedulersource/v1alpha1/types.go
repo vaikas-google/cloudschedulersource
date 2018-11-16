@@ -35,8 +35,17 @@ type CloudSchedulerSource struct {
 
 // CloudSchedulerSourceSpec is the spec for a CloudSchedulerSource resource
 type CloudSchedulerSourceSpec struct {
-	Schedule   string `json:"schedule"`
-	HTTPMethod string `json:"httpMethod"`
+	// Location where to create the Job in.
+	Location string `json:"location"`
+	// Schedule in cron format, for example: "* * * * *" would be run
+	// every minute.
+	Schedule string `json:"schedule"`
+	// Which method to use to call. GET,PUT or POST. If omitted uses POST
+	// +optional
+	HTTPMethod string `json:"httpMethod,omitempty"`
+	// What data to send in the call body (PUT/POST).
+	// +optional
+	Body string `json:"body,omitempty"`
 
 	// TODO: Add other configuration options here...
 
