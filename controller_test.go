@@ -17,12 +17,10 @@ limitations under the License.
 package main
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 	"time"
 
-	apps "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -33,14 +31,19 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 
-	samplecontroller "k8s.io/sample-controller/pkg/apis/samplecontroller/v1alpha1"
-	"k8s.io/sample-controller/pkg/client/clientset/versioned/fake"
-	informers "k8s.io/sample-controller/pkg/client/informers/externalversions"
+	"github.com/vaikas-google/cloudschedulersource/pkg/apis/cloudschedulersource/v1alpha1"
+	"github.com/vaikas-google/cloudschedulersource/pkg/client/clientset/versioned/fake"
+	informers "github.com/vaikas-google/cloudschedulersource/pkg/client/informers/externalversions"
 )
 
 var (
 	alwaysReady        = func() bool { return true }
 	noResyncPeriodFunc = func() time.Duration { return 0 }
+)
+
+const (
+	testLocation            = "secret-lair"
+	testScheduleEveryMinute = "* * * * *"
 )
 
 type fixture struct {
@@ -49,8 +52,7 @@ type fixture struct {
 	client     *fake.Clientset
 	kubeclient *k8sfake.Clientset
 	// Objects to put in the store.
-	fooLister        []*samplecontroller.Foo
-	deploymentLister []*apps.Deployment
+	csLister []*v1alpha1.CloudSchedulerSource
 	// Actions expected to happen on the client.
 	kubeactions []core.Action
 	actions     []core.Action
@@ -67,16 +69,16 @@ func newFixture(t *testing.T) *fixture {
 	return f
 }
 
-func newFoo(name string, replicas *int32) *samplecontroller.Foo {
-	return &samplecontroller.Foo{
-		TypeMeta: metav1.TypeMeta{APIVersion: samplecontroller.SchemeGroupVersion.String()},
+func newCloudSchedulerSource(name string, location string, schedule string) *v1alpha1.CloudSchedulerSource {
+	return &v1alpha1.CloudSchedulerSource{
+		TypeMeta: metav1.TypeMeta{APIVersion: v1alpha1.SchemeGroupVersion.String()},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: metav1.NamespaceDefault,
 		},
-		Spec: samplecontroller.FooSpec{
-			DeploymentName: fmt.Sprintf("%s-deployment", name),
-			Replicas:       replicas,
+		Spec: v1alpha1.CloudSchedulerSourceSpec{
+			Location: location,
+			Schedule: schedule,
 		},
 	}
 }
@@ -88,33 +90,27 @@ func (f *fixture) newController() (*Controller, informers.SharedInformerFactory,
 	i := informers.NewSharedInformerFactory(f.client, noResyncPeriodFunc())
 	k8sI := kubeinformers.NewSharedInformerFactory(f.kubeclient, noResyncPeriodFunc())
 
-	c := NewController(f.kubeclient, f.client,
-		k8sI.Apps().V1().Deployments(), i.Samplecontroller().V1alpha1().Foos())
+	c := NewController(f.kubeclient, f.client, i.Sources().V1alpha1().CloudSchedulerSources())
 
-	c.foosSynced = alwaysReady
-	c.deploymentsSynced = alwaysReady
+	c.csSynced = alwaysReady
 	c.recorder = &record.FakeRecorder{}
 
-	for _, f := range f.fooLister {
-		i.Samplecontroller().V1alpha1().Foos().Informer().GetIndexer().Add(f)
-	}
-
-	for _, d := range f.deploymentLister {
-		k8sI.Apps().V1().Deployments().Informer().GetIndexer().Add(d)
+	for _, f := range f.csLister {
+		i.Sources().V1alpha1().CloudSchedulerSources().Informer().GetIndexer().Add(f)
 	}
 
 	return c, i, k8sI
 }
 
-func (f *fixture) run(fooName string) {
-	f.runController(fooName, true, false)
+func (f *fixture) run(csName string) {
+	f.runController(csName, true, false)
 }
 
-func (f *fixture) runExpectError(fooName string) {
-	f.runController(fooName, true, true)
+func (f *fixture) runExpectError(csName string) {
+	f.runController(csName, true, true)
 }
 
-func (f *fixture) runController(fooName string, startInformers bool, expectError bool) {
+func (f *fixture) runController(csName string, startInformers bool, expectError bool) {
 	c, i, k8sI := f.newController()
 	if startInformers {
 		stopCh := make(chan struct{})
@@ -123,11 +119,11 @@ func (f *fixture) runController(fooName string, startInformers bool, expectError
 		k8sI.Start(stopCh)
 	}
 
-	err := c.syncHandler(fooName)
+	err := c.syncHandler(csName)
 	if !expectError && err != nil {
-		f.t.Errorf("error syncing foo: %v", err)
+		f.t.Errorf("error syncing cs: %v", err)
 	} else if expectError && err == nil {
-		f.t.Error("expected error syncing foo, got nil")
+		f.t.Error("expected error syncing cs, got nil")
 	}
 
 	actions := filterInformerActions(f.client.Actions())
@@ -212,8 +208,8 @@ func filterInformerActions(actions []core.Action) []core.Action {
 	ret := []core.Action{}
 	for _, action := range actions {
 		if len(action.GetNamespace()) == 0 &&
-			(action.Matches("list", "foos") ||
-				action.Matches("watch", "foos") ||
+			(action.Matches("list", "cloudschedulersources") ||
+				action.Matches("watch", "cloudschedulersources") ||
 				action.Matches("list", "deployments") ||
 				action.Matches("watch", "deployments")) {
 			continue
@@ -224,90 +220,28 @@ func filterInformerActions(actions []core.Action) []core.Action {
 	return ret
 }
 
-func (f *fixture) expectCreateDeploymentAction(d *apps.Deployment) {
-	f.kubeactions = append(f.kubeactions, core.NewCreateAction(schema.GroupVersionResource{Resource: "deployments"}, d.Namespace, d))
-}
-
-func (f *fixture) expectUpdateDeploymentAction(d *apps.Deployment) {
-	f.kubeactions = append(f.kubeactions, core.NewUpdateAction(schema.GroupVersionResource{Resource: "deployments"}, d.Namespace, d))
-}
-
-func (f *fixture) expectUpdateFooStatusAction(foo *samplecontroller.Foo) {
-	action := core.NewUpdateAction(schema.GroupVersionResource{Resource: "foos"}, foo.Namespace, foo)
+func (f *fixture) expectUpdateCloudSchedulerSourceStatusAction(cs *v1alpha1.CloudSchedulerSource) {
+	action := core.NewUpdateAction(schema.GroupVersionResource{Resource: "cloudschedulersources"}, cs.Namespace, cs)
 	// TODO: Until #38113 is merged, we can't use Subresource
 	//action.Subresource = "status"
 	f.actions = append(f.actions, action)
 }
 
-func getKey(foo *samplecontroller.Foo, t *testing.T) string {
-	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(foo)
+func getKey(cs *v1alpha1.CloudSchedulerSource, t *testing.T) string {
+	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(cs)
 	if err != nil {
-		t.Errorf("Unexpected error getting key for foo %v: %v", foo.Name, err)
+		t.Errorf("Unexpected error getting key for cs %v: %v", cs.Name, err)
 		return ""
 	}
 	return key
 }
 
-func TestCreatesDeployment(t *testing.T) {
-	f := newFixture(t)
-	foo := newFoo("test", int32Ptr(1))
-
-	f.fooLister = append(f.fooLister, foo)
-	f.objects = append(f.objects, foo)
-
-	expDeployment := newDeployment(foo)
-	f.expectCreateDeploymentAction(expDeployment)
-	f.expectUpdateFooStatusAction(foo)
-
-	f.run(getKey(foo, t))
-}
-
 func TestDoNothing(t *testing.T) {
 	f := newFixture(t)
-	foo := newFoo("test", int32Ptr(1))
-	d := newDeployment(foo)
+	cs := newCloudSchedulerSource("test", testLocation, testScheduleEveryMinute)
 
-	f.fooLister = append(f.fooLister, foo)
-	f.objects = append(f.objects, foo)
-	f.deploymentLister = append(f.deploymentLister, d)
-	f.kubeobjects = append(f.kubeobjects, d)
+	f.csLister = append(f.csLister, cs)
+	f.objects = append(f.objects, cs)
 
-	f.expectUpdateFooStatusAction(foo)
-	f.run(getKey(foo, t))
+	f.run(getKey(cs, t))
 }
-
-func TestUpdateDeployment(t *testing.T) {
-	f := newFixture(t)
-	foo := newFoo("test", int32Ptr(1))
-	d := newDeployment(foo)
-
-	// Update replicas
-	foo.Spec.Replicas = int32Ptr(2)
-	expDeployment := newDeployment(foo)
-
-	f.fooLister = append(f.fooLister, foo)
-	f.objects = append(f.objects, foo)
-	f.deploymentLister = append(f.deploymentLister, d)
-	f.kubeobjects = append(f.kubeobjects, d)
-
-	f.expectUpdateFooStatusAction(foo)
-	f.expectUpdateDeploymentAction(expDeployment)
-	f.run(getKey(foo, t))
-}
-
-func TestNotControlledByUs(t *testing.T) {
-	f := newFixture(t)
-	foo := newFoo("test", int32Ptr(1))
-	d := newDeployment(foo)
-
-	d.ObjectMeta.OwnerReferences = []metav1.OwnerReference{}
-
-	f.fooLister = append(f.fooLister, foo)
-	f.objects = append(f.objects, foo)
-	f.deploymentLister = append(f.deploymentLister, d)
-	f.kubeobjects = append(f.kubeobjects, d)
-
-	f.runExpectError(getKey(foo, t))
-}
-
-func int32Ptr(i int32) *int32 { return &i }
