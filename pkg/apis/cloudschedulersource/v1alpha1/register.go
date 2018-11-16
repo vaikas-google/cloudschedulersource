@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"k8s.io/sample-controller/pkg/apis/sources"
+	"github.com/vaikas-google/cloudschedulersource/pkg/apis/sources"
 )
 
 // SchemeGroupVersion is group version used to register these objects
